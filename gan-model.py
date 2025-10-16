@@ -2,6 +2,8 @@
 # Analysing data set
 
 import pandas as pd
+import numpy as np
+from scipy.interpolate import splrep, splev, interp1d, splprep, BSpline
 import datashader as ds
 import colorcet as cc
 import matplotlib.pyplot as plt
@@ -14,43 +16,24 @@ import time
 df = pd.read_csv('Daily_Data_EV.csv')
 
 # %%
-source_as_list = list(df['source'])
-
-split_proper = [coord_pair.split(',') for coord_pair in source_as_list]
-
-split_proper
-
-# %%
-# split departure time into separate columns (2) for hours and minutes
-df_time_num_temp = df['departure_time'].str.split(pat=':',expand=True).astype(int)
-
-# converting hour-minute format to float and joining back into one number
-time_num = df_time_num_temp[0] + df_time_num_temp[1]/60
-
-# %%
-# get time block length based on min-max of dataset
-# assuming 3 time blocks in a day (morning, afternoon, evening)
-time_block_length = (time_num.max()-time_num.min()) / 3
-
-# get range idea to decide block
-prev_time_block = time_num.min()
-for i in range (1,4):
-    second_time_block = prev_time_block + time_block_length
-    print("{start} - {end}".format(start=prev_time_block,end=second_time_block))
-    prev_time_block = second_time_block
-
-
-# %%
 # settle for the following times
     # 3:00 - 10:00 (Morning)
     # 10:00 - 17:00 (Afternoon)
     # 17:00 - 24:00 (Evenning)
 
-# put time decimal into pandas dataframe to join back with original
-df_time_decimal = pd.DataFrame({'time_decimal':time_num})
+# split departure time into separate columns (2) for hours and minutes
+df_time_split = df['departure_time'].str.split(pat=':',expand=True).astype(int)
 
-# joining new column with time decimal with main dataframe
-df = df.join(df_time_decimal)
+# converting hour-minute format to float and joining back into one number
+    # int value + 0. decimal value
+time_num_decimal =  df_time_split[0] + df_time_split[1]/60
+
+# put time decimal into pandas dataframe to join back with original
+df_time_decimal = pd.DataFrame({'time_decimal':time_num_decimal})
+df_time_int = pd.DataFrame({'time_int':df_time_split[0]})
+
+# joining new column with time decimal and int with main dataframe
+df = df.join(df_time_decimal).join(df_time_int)
 
 # %%
 # histogram
@@ -60,7 +43,7 @@ plt.xlabel("Time (h)")
 
 # %%
 # separating dataset with only EV-#, Trip, Departure Time and Decimal Time
-cleaned_df = df[['EV Number', 'Trip', 'departure_time', 'time_decimal', 't_dist']]
+cleaned_df = df[['EV Number', 'Trip', 'departure_time', 'time_decimal', 'time_int', 't_dist']]
 
 # splitting coordinate cells by ',' into separate latitude and longitude columns for source and destination
     # remember to convert into float
@@ -71,7 +54,7 @@ destination_df = df['destination'].str.split(pat=",", expand=True).astype('float
 cleaned_df = pd.concat([cleaned_df, source_df, destination_df], axis=1)
 
 # renaming columns
-cleaned_df.columns = ['EV_Number', 'Trip','departure_time', 'time_decimal', 'distance', 'source_lat', 'source_lon', 'destination_lat', 'destination_lon']
+cleaned_df.columns = ['EV_Number', 'Trip','departure_time', 'time_decimal', 'time_int', 'distance', 'source_lat', 'source_lon', 'destination_lat', 'destination_lon']
 
 cleaned_df.head(10)
 
@@ -94,17 +77,23 @@ def get_coord_df(ev_set):
     # renaming labels to match source df when concatenating so index match on concatenation
     last_row.index = ev_source.columns
 
-    # return concatenated df
-    return pd.concat([ev_source,last_row.to_frame().T], axis=0, ignore_index=True)
+    # appending last row to end with concatenate (taking transpose of row)
+    return_df = pd.concat([ev_source,last_row.to_frame().T], axis=0, ignore_index=True)
+    return_df.columns = ['lat', 'lon']
+
+    return return_df
 
 # %%
 # Getting map coordinate boundaries
 coord_df = get_coord_df(cleaned_df)
 
 # 0 is 3 o'clock, 1 is 6 o'clock, 2 is 9 o'clock, 3 is 12 o'clock
-box_boundaries = [coord_df['source_lon'].max(), coord_df['source_lat'].min(), coord_df['source_lon'].min(), coord_df['source_lat'].max()]
+box_boundaries = [coord_df['lon'].max(), coord_df['lat'].min(), coord_df['lon'].min(), coord_df['lat'].max()]
 
 box_boundaries
+
+# %%
+coord_df
 
 # %%
 # Separating dataset into morning
@@ -133,6 +122,19 @@ df_blocks = {
 }
 
 print(morning_cleaned_df.count(), midday_cleaned_df.count(), evening_cleaned_df.count())
+
+# %%
+# list for 24h blocks
+time_blocks_24 = []
+
+# ranges from 0 to 23 (total 24)
+for x in range(0,24):
+    next_x = x + 1
+    dict = {
+        "name" : "hour-{x}".format(x=x),
+        "dataframe" : cleaned_df[(cleaned_df['time_decimal']>=x) & (cleaned_df['time_decimal']<next_x)]
+    }
+    time_blocks_24.append(dict)
 
 # %%
 block_plot_index = 1
@@ -247,213 +249,214 @@ def get_coord_list(df):
 
     return coord_list
 
-# %% [markdown]
-# ### High-Rez Plotting for Multiple
+# %%
+time_blocks_24[3]["dataframe"]
 
 # %%
-# Total 7000 EVs
-# EV1 Elapsed: ~0.07s
-# Time Estimate: 7000 * 0.07 = 490s = ~8.167 mins
+# get coordinates by time range
+    # filter df by time range
+    # get route for every motif / row in df
+    # append (coords, dept time) to coord list
 
-# Lineplotting "High-Rez" Plotting
+# can pretty much ignore EV number
 
-num_evs = 2000
-block_used = df_blocks["morning"]
+"""
+returns points in df for time range (inclusive, exclusive]
+    like 14:00 to 15:00 (up to 15:00, not included)
+"""
+def get_points(df, time_range):
+    range_df = df[(df["time_int"] >= time_range[0]) & (df["time_int"] < time_range[1])]
 
-for i in range(1,num_evs):
-    # getting data for one EV
-    ev_name = "EV-" + str(i)
-    df_block = block_used["dataframe"]
-    ev_df = df_block[df_block['EV_Number']==ev_name]
+    # 3d list - [lon, lat, time]
+        # ex: [[34.52, -89.34, 6], [34.23, -89.43, 7], [34.56, -89.03, 9]]
+    list_used = []
 
-    # check if not empty (i.e., if there is an entry for that EV_#)
-    if(not ev_df.empty):
-        # get dataframe with just motif coords (lat, lon)
-        coord_df = get_coord_df(ev_df)
-
-        # put dataframe into coord list format for ORS API
-            # ex: [[34.52, -89.34], [34.23, -89.43], [34.56, -89.03]]
-        coord_list = get_coord_list(coord_df)
+    for row in range_df.itertuples():
+        depart_time = row.time_int
+        coords_pair = [[row.source_lon, row.source_lat],[row.destination_lon, row.destination_lat]]
 
         # getting route from API, returns list with coordinate pair list
-            # returns something similar to input except with more datapoints
+            # returns something similar to input (ex just above) except with more datapoints
         try:
-            api_response = client.directions(coord_list, profile="driving-car", format="geojson")
-            route_coord_list = api_response["features"][0]["geometry"]["coordinates"]
-        except ors.exceptions.ApiError as e:
-            api_error_code = e.args[0]
-            ors_error_code = e.args[1]["error"]["code"]
-            ors_error_msg = e.args[1]["error"]["message"]
-            print("API Error: ", api_error_code)
-            print("Error Code: ", ors_error_code)
-            print("EV Number: ", ev_name)
-            print("Message: ", ors_error_msg)
-            print()
-
-        # put coordinate pair list back into df for plotting
-        route_df = pd.DataFrame(route_coord_list, columns=['lon', 'lat'])
-
-        sns.despine(left=True, bottom=True)
-        plt.tight_layout()
-        ax = sns.lineplot(data=route_df, x='lon', y='lat', color='blue', alpha=0.3, sort=False, lw=3, estimator=None)
-        plt.axis('off')
-
-plt.savefig("routes/{block_name}-routes-{ev_num}.png".format(block_name=block_used["name"], ev_num=num_evs), dpi=100)
-plt.close()
-
-
-# %%
-# Collect points for datashader
-
-# Morning
-
-# list to hold datashader points
-morning_ds_points = []
-
-# measuring time
-block_start_time = time.time()
-time_list = []
-ev_tl_index = 0
-ev_time_list = [100*2**x for x in range(1,7)]
-
-num_evs = 7001
-block_used = df_blocks["morning"]
-list_used = morning_ds_points
-
-for i in range(1,num_evs):
-    # getting data for one EV
-    ev_name = "EV-" + str(i)
-    df_block = block_used["dataframe"]
-    ev_df = df_block[df_block['EV_Number']==ev_name]
-
-    # check if not empty (i.e., if there is an entry for that EV_#)
-    if(not ev_df.empty):
-        # get dataframe with just motif coords (lat, lon)
-        coord_df = get_coord_df(ev_df)
-
-        # put dataframe into coord list format for ORS API
-            # ex: [[34.52, -89.34], [34.23, -89.43], [34.56, -89.03]]
-        coord_list = get_coord_list(coord_df)
-
-        # getting route from API, returns list with coordinate pair list
-            # returns something similar to input except with more datapoints
-        try:
-            api_response = client.directions(coord_list, profile="driving-car", format="geojson")
+            api_response = client.directions(coords_pair, profile="driving-car", format="geojson")
             route_coord_list = api_response["features"][0]["geometry"]["coordinates"]
 
             # append coordinate list to master points list
             for coord_pair in route_coord_list:
-                list_used.append(coord_pair)
+                append_trio = coord_pair
+                append_trio.append(depart_time)
+                list_used.append(append_trio)
 
         except ors.exceptions.ApiError as e:
+            # catching errors for unreachable routes (mostly ev's that stopped inside airports etc., negligible)
             api_error_code = e.args[0]
             ors_error_code = e.args[1]["error"]["code"]
             ors_error_msg = e.args[1]["error"]["message"]
-            print("API Error: ", api_error_code)
-            print("Error Code: ", ors_error_code)
-            print("EV Number: ", ev_name)
-            print("Message: ", ors_error_msg)
-            print()
+            # print("API Error: ", api_error_code)
+            # print("Error Code: ", ors_error_code)
+            # print("Message: ", ors_error_msg)
+            # print()
+        
+    return list_used
 
-    if i in ev_time_list:
-        end_time = time.time()
-        elapsed_time = end_time - block_start_time
-        time_list.append([ev_time_list[ev_tl_index], elapsed_time])
-        ev_tl_index = ev_tl_index + 1
+# %%
 
-    if i == num_evs-1:
-        end_time = time.time()
-        elapsed_time = end_time - block_start_time
-        time_list.append([num_evs-1, elapsed_time])
-        ev_tl_index = ev_tl_index + 1
+df_3 = cleaned_df[cleaned_df["EV_Number"]=="EV-3"]
+value_arr = df_3.iloc[0].tolist()
+coords_pair_3 = [[float(value_arr[7]), float(value_arr[6])], [float(value_arr[9]), float(value_arr[8])]]
+
+api_response_3 = client.directions(coords_pair_3, profile="driving-car", format="geojson")
+route_coord_list_3 = api_response_3["features"][0]["geometry"]["coordinates"]
+
+for coord_paid_arr in route_coord_list_3:
+    coord_paid_arr.append(value_arr[4])
+
+# %%
+points_3 = route_coord_list_3
+points_3_df = pd.DataFrame(points_3, columns=['lon', 'lat', 'time_int'])
+points_3_df
+
+# %%
+points_3_sorted_df = points_3_df.sort_values(by=['lon'])
+
+# %%
+x = points_3_sorted_df['lon'].to_numpy()
+y = points_3_sorted_df['lat'].to_numpy()
+
+# %%
+drop_pc = 0.8
+drop_n = int(np.floor(len(points_3_df)*drop_pc))
+drop_indices = np.random.choice(points_3_df.index, drop_n, replace=False)
+dropped_points_3_df = points_3_df.drop(drop_indices)
+
+x_dropped = dropped_points_3_df['lon'].to_numpy()
+y_dropped = dropped_points_3_df['lat'].to_numpy()
+
+n_interior_knots = 60
+qs = np.linspace(0, 1, n_interior_knots+2)[1:-1]
+knots = np.quantile(x, qs)
+
+# Find the B-spline representation (cubic spline, with some smoothing)
+tck = splrep(x, y, t=knots, s=2, k=3)
+
+# Evaluate the spline at a finer set of points
+x_new = np.linspace(x.min(), x.max(), 269)
+y_smooth = splev(x_new, tck)
+
+# unsorted values
+x_unsorted = points_3_df['lon'].to_numpy()
+y_unsorted = points_3_df['lat'].to_numpy()
+
+# prep
+new_t = np.linspace(0, 1, 50)
+new_tck, u = splprep([x_unsorted, y_unsorted], s=0)
+new_points = splev(new_t, new_tck)
+
+dropped_t = np.linspace(0, 1, 50)
+tck_dropped, u_dropped = splprep([x_dropped, y_dropped], s=0)
+new_points_dropped = splev(dropped_t, tck_dropped)
+
+# interp1d
+f = interp1d(x_unsorted, y_unsorted, kind='linear', assume_sorted=False)
+y_new = f(x_new)
+
+# Plot the original data and the smoothed spline
+# plt.plot(x, y, 'o', label='Original Data')
+# plt.plot(x_dropped, y_dropped, 'o', label='Dropped Data')
+# plt.plot(x_new, y_smooth, label='Smoothed Spline')
+# plt.plot(x_new, y_new, 'o', label='Inter1D')
+plt.plot(new_points[0], new_points[1], 'ro', label='PrepSpline Original Points')
+plt.plot(new_points[0], new_points[1], 'b-', label='PrepSpline Original Line')
+# plt.plot(new_points_dropped[0], new_points_dropped[1], 'g-', label='PrepSpline Dropped Line')
+plt.legend()
+plt.show()
+
+# %%
+x_new
+
+# %%
+plt.plot([x/100 for x in range(0,269)], u)
+plt.show()
+
+# %%
+# 1. Define the data points for the parametric curve
+# These are your (x, y) coordinates along the curve
+x_ex = np.array([0, 1, 2, 3, 4, 5])
+y_ex = np.array([0, 2, 1, 3, 2, 4])
+
+# 2. Fit splines to the data using splprep
+# splprep takes a list of arrays representing the curve in N-D space.
+# s=0 ensures the spline passes through all input points (no smoothing).
+# per=True can be used for closed curves if the start and end points are the same.
+tck, u = splprep([x_ex, y_ex], s=0, per=True)
+
+# 3. Evaluate the fitted splines at new parameter values using splev
+# np.linspace creates a sequence of evenly spaced parameter values for the  curve.
+u_new = np.linspace(u.min(), u.max(), 10) # 100 points for a smooth curve
+x_new, y_new = splev(u_new, tck)
+
+# 4. Plot the original points and the interpolated curve
+plt.figure(figsize=(8, 6))
+plt.plot(x_ex, y_ex, 'or', label='Original Points') # 'or' for red circles
+plt.plot(x_new, y_new, 'ob', label='Interpolated Curve') # '-b' for blue line
+plt.title('Parametric Curve Interpolation')
+plt.xlabel('X-coordinate')
+plt.ylabel('Y-coordinate')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# %%
+y_new
+
+# %%
+ds_points_6 = get_points(cleaned_df, [0,8])
+
+augmented_points_df_6 = pd.DataFrame(ds_points_6, columns=['lon', 'lat', 'time_int'])
+augmented_points_df_6['time_int'] = augmented_points_df_6['time_int'].astype('category')
+
+len(augmented_points_df_6)
+
+# %%
+ds_canvas_6 = ds.Canvas(plot_width=500, plot_height=500)
+
+agg_6 = ds_canvas_6.points(augmented_points_df_6, 'lon', 'lat', ds.by('time_int', ds.count()))
+
+# %%
+# shading original image with black background
+img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int='4'), px=2), cmap=cc.fire), "black")
+img_7 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int='7'), px=2), cmap=cc.fire), "black")
+
+# displaying both images next to each other
+ds.tf.Images(img_6, img_7)
+
+# %%
+time_list = [6, 9]
+
+time_block_df_6 = time_blocks_24[6]["dataframe"]
+
+time_block_df_9 = time_blocks_24[9]["dataframe"]
+
+ds_points_6 = get_points(time_block_df_6)
+
+ds_points_9 = get_points(time_block_df_9)
+
+
+augmented_points_df_6 = pd.DataFrame(ds_points_6, columns=['lon', 'lat', 'time_int'])
+
+augmented_points_df_9 = pd.DataFrame(ds_points_9, columns=['lon', 'lat'])
 
 
 # %%
-morning_time_run = pd.DataFrame(time_list, columns=["number_of_evs", "time"])
-sns.lineplot(morning_time_run, x='number_of_evs', y='time')
+(agg_6.data.max(), agg_9.data.max())
 
 # %%
-morning_ds_points[0]
+# shading original image with black background
+img_6 = ds.tf.set_background(ds.tf.shade(agg_9, cmap=cc.fire), "black")
+img_9 = ds.tf.set_background(ds.tf.shade(agg_9, cmap=cc.fire), "black")
 
-# %%
-len(morning_ds_points)
-
-# %%
-#### Collect points for datashader ###
-
-# measuring time things
-block_start_time = time.time()
-time_list = []
-ev_time_list = [100*2**x for x in range(1,7)]
-
-# number of ev's to go through (max: 7001)
-    # 7000 + 1 to account for index
-num_evs = 7001
-
-# iterate through all time blocks and generate points
-for block in df_blocks:
-    block_used = df_blocks[block]
-    list_used = []
-    ev_tl_index = 0
-
-    # iterating over all ev's in list
-    # must go per ev (and not line by line) so as to get the points between an individual ev's routes
-    for i in range(1,num_evs):
-        # getting data for one EV
-        ev_name = "EV-" + str(i)
-        df_block = block_used["dataframe"]
-        ev_df = df_block[df_block['EV_Number']==ev_name]
-
-        # check if not empty (i.e., if there is an entry for that EV_#)
-            # necessary after splitting for time (EV# may not be present in all time blocks)
-        if(not ev_df.empty):
-            # get dataframe with just motif coords (lat, lon)
-            coord_df = get_coord_df(ev_df)
-
-            # put dataframe into coord list format for ORS API
-                # ex: [[34.52, -89.34], [34.23, -89.43], [34.56, -89.03]]
-            coord_list = get_coord_list(coord_df)
-
-            # getting route from API, returns list with coordinate pair list
-                # returns something similar to input (ex just above) except with more datapoints
-            try:
-                api_response = client.directions(coord_list, profile="driving-car", format="geojson")
-                route_coord_list = api_response["features"][0]["geometry"]["coordinates"]
-
-                # append coordinate list to master points list
-                for coord_pair in route_coord_list:
-                    list_used.append(coord_pair)
-
-            except ors.exceptions.ApiError as e:
-                # catching errors for unreachable routes (mostly ev's that stopped inside airports etc.)
-                api_error_code = e.args[0]
-                ors_error_code = e.args[1]["error"]["code"]
-                ors_error_msg = e.args[1]["error"]["message"]
-                # print("API Error: ", api_error_code)
-                # print("Error Code: ", ors_error_code)
-                # print("EV Number: ", ev_name)
-                # print("Message: ", ors_error_msg)
-                # print()
-
-        # storing time values in a list to plot later
-        if i in ev_time_list:
-            end_time = time.time()
-            elapsed_time = end_time - block_start_time
-            time_list.append([ev_time_list[ev_tl_index], elapsed_time])
-            ev_tl_index = ev_tl_index + 1
-        if i == num_evs-1:
-            end_time = time.time()
-            elapsed_time = end_time - block_start_time
-            time_list.append([num_evs-1, elapsed_time, block])
-            ev_tl_index = ev_tl_index + 1
-
-    # saving points to time block list
-    df_blocks[block]["point_list"] = list_used
-
-# %%
-print(len(df_blocks["morning"]["point_list"]))
-print(len(df_blocks["midday"]["point_list"]))
-print(len(df_blocks["evening"]["point_list"]))
+# displaying both images next to each other
+ds.tf.Images(img_6, img_9)
 
 # %%
 # morning datashader plotting
@@ -503,41 +506,6 @@ spread_img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(evening_agg, px=3), c
 # displaying both images next to each other
 ds.tf.Images(original_img, spread_img)
 
-
-
-# %%
-# # Total 7000 EVs
-# # EV1 Elapsed: ~3.65s
-# # Time Estimate: 7000 * 3.65 = 25,550s
-# # ---> 7h...
-
-# # Low-Polly Plotting lol
-
-# plt.figure(figsize=(17,20))
-
-# num_evs = 30
-# evs_per_row = 5
-
-# for i in range(1,num_evs):
-#     # getting data for one EV
-#     ev_name = "EV-" + str(i)
-#     ev_df = cleaned_df[cleaned_df['EV_Number']==ev_name]
-
-#     plotable_set = get_coord_df(ev_df)
-
-#     plt.subplot(int(num_evs/evs_per_row), evs_per_row, i) # 2 rows, 5 columns, ith graph
-#     sns.despine(left=True, bottom=True)
-#     plt.tight_layout()
-#     ax = sns.lineplot(data=plotable_set, x='source_lon', y='source_lat', sort=False, lw=3)
-    
-#     # aesthetics
-#     ax.set_title(ev_name + " Trip")
-
-# plt.savefig("low-polly-routes.png")
-# plt.close() 
-
-
-# %%
 
 
 
