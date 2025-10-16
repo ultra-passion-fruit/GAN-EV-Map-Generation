@@ -317,32 +317,6 @@ points_3_df = pd.DataFrame(points_3, columns=['lon', 'lat', 'time_int'])
 points_3_df
 
 # %%
-points_3_sorted_df = points_3_df.sort_values(by=['lon'])
-
-# %%
-x = points_3_sorted_df['lon'].to_numpy()
-y = points_3_sorted_df['lat'].to_numpy()
-
-# %%
-drop_pc = 0.8
-drop_n = int(np.floor(len(points_3_df)*drop_pc))
-drop_indices = np.random.choice(points_3_df.index, drop_n, replace=False)
-dropped_points_3_df = points_3_df.drop(drop_indices)
-
-x_dropped = dropped_points_3_df['lon'].to_numpy()
-y_dropped = dropped_points_3_df['lat'].to_numpy()
-
-n_interior_knots = 60
-qs = np.linspace(0, 1, n_interior_knots+2)[1:-1]
-knots = np.quantile(x, qs)
-
-# Find the B-spline representation (cubic spline, with some smoothing)
-tck = splrep(x, y, t=knots, s=2, k=3)
-
-# Evaluate the spline at a finer set of points
-x_new = np.linspace(x.min(), x.max(), 269)
-y_smooth = splev(x_new, tck)
-
 # unsorted values
 x_unsorted = points_3_df['lon'].to_numpy()
 y_unsorted = points_3_df['lat'].to_numpy()
@@ -352,62 +326,12 @@ new_t = np.linspace(0, 1, 50)
 new_tck, u = splprep([x_unsorted, y_unsorted], s=0)
 new_points = splev(new_t, new_tck)
 
-dropped_t = np.linspace(0, 1, 50)
-tck_dropped, u_dropped = splprep([x_dropped, y_dropped], s=0)
-new_points_dropped = splev(dropped_t, tck_dropped)
-
-# interp1d
-f = interp1d(x_unsorted, y_unsorted, kind='linear', assume_sorted=False)
-y_new = f(x_new)
-
 # Plot the original data and the smoothed spline
-# plt.plot(x, y, 'o', label='Original Data')
-# plt.plot(x_dropped, y_dropped, 'o', label='Dropped Data')
-# plt.plot(x_new, y_smooth, label='Smoothed Spline')
-# plt.plot(x_new, y_new, 'o', label='Inter1D')
+plt.plot(x_unsorted, y_unsorted, 'o', label='Original Data')
 plt.plot(new_points[0], new_points[1], 'ro', label='PrepSpline Original Points')
 plt.plot(new_points[0], new_points[1], 'b-', label='PrepSpline Original Line')
-# plt.plot(new_points_dropped[0], new_points_dropped[1], 'g-', label='PrepSpline Dropped Line')
 plt.legend()
 plt.show()
-
-# %%
-x_new
-
-# %%
-plt.plot([x/100 for x in range(0,269)], u)
-plt.show()
-
-# %%
-# 1. Define the data points for the parametric curve
-# These are your (x, y) coordinates along the curve
-x_ex = np.array([0, 1, 2, 3, 4, 5])
-y_ex = np.array([0, 2, 1, 3, 2, 4])
-
-# 2. Fit splines to the data using splprep
-# splprep takes a list of arrays representing the curve in N-D space.
-# s=0 ensures the spline passes through all input points (no smoothing).
-# per=True can be used for closed curves if the start and end points are the same.
-tck, u = splprep([x_ex, y_ex], s=0, per=True)
-
-# 3. Evaluate the fitted splines at new parameter values using splev
-# np.linspace creates a sequence of evenly spaced parameter values for the  curve.
-u_new = np.linspace(u.min(), u.max(), 10) # 100 points for a smooth curve
-x_new, y_new = splev(u_new, tck)
-
-# 4. Plot the original points and the interpolated curve
-plt.figure(figsize=(8, 6))
-plt.plot(x_ex, y_ex, 'or', label='Original Points') # 'or' for red circles
-plt.plot(x_new, y_new, 'ob', label='Interpolated Curve') # '-b' for blue line
-plt.title('Parametric Curve Interpolation')
-plt.xlabel('X-coordinate')
-plt.ylabel('Y-coordinate')
-plt.legend()
-plt.grid(True)
-plt.show()
-
-# %%
-y_new
 
 # %%
 ds_points_6 = get_points(cleaned_df, [0,8])
