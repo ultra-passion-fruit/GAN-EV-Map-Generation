@@ -3,7 +3,7 @@
 
 import pandas as pd
 import numpy as np
-from scipy.interpolate import splrep, splev, interp1d, splprep, BSpline
+from scipy.interpolate import splev, splprep
 import datashader as ds
 import colorcet as cc
 import matplotlib.pyplot as plt
@@ -16,11 +16,6 @@ import time
 df = pd.read_csv('Daily_Data_EV.csv')
 
 # %%
-# settle for the following times
-    # 3:00 - 10:00 (Morning)
-    # 10:00 - 17:00 (Afternoon)
-    # 17:00 - 24:00 (Evenning)
-
 # split departure time into separate columns (2) for hours and minutes
 df_time_split = df['departure_time'].str.split(pat=':',expand=True).astype(int)
 
@@ -121,22 +116,9 @@ df_blocks = {
         }
 }
 
-print(morning_cleaned_df.count(), midday_cleaned_df.count(), evening_cleaned_df.count())
-
 # %%
-# list for 24h blocks
-time_blocks_24 = []
+# Show Departure Time Histogram for 3 time blocks
 
-# ranges from 0 to 23 (total 24)
-for x in range(0,24):
-    next_x = x + 1
-    dict = {
-        "name" : "hour-{x}".format(x=x),
-        "dataframe" : cleaned_df[(cleaned_df['time_decimal']>=x) & (cleaned_df['time_decimal']<next_x)]
-    }
-    time_blocks_24.append(dict)
-
-# %%
 block_plot_index = 1
 
 plt.figure(figsize=(15, 10))
@@ -164,12 +146,8 @@ for block in df_blocks:
 plt.show()
 
 # %%
-# getting EV-1 set as an example to convert into map
-ev1_cleaned_df = cleaned_df[cleaned_df['EV_Number']=="EV-1"]
+ev1_cleaned_df = cleaned_df[cleaned_df["EV_Number"]=="EV-1"]
 
-ev1_cleaned_df
-
-# %%
 # merging source and destination into one series so they are connected in order when graphed
 ev1_source = ev1_cleaned_df[['source_lat', 'source_lon']]
 ev1_destination = ev1_cleaned_df[['destination_lat', 'destination_lon']]
@@ -250,9 +228,6 @@ def get_coord_list(df):
     return coord_list
 
 # %%
-time_blocks_24[3]["dataframe"]
-
-# %%
 # get coordinates by time range
     # filter df by time range
     # get route for every motif / row in df
@@ -264,65 +239,101 @@ time_blocks_24[3]["dataframe"]
 returns points in df for time range (inclusive, exclusive]
     like 14:00 to 15:00 (up to 15:00, not included)
 """
-def get_points(df, time_range):
+def get_points(df, time_range, err=False):
     range_df = df[(df["time_int"] >= time_range[0]) & (df["time_int"] < time_range[1])]
 
     # 3d list - [lon, lat, time]
         # ex: [[34.52, -89.34, 6], [34.23, -89.43, 7], [34.56, -89.03, 9]]
     list_used = []
 
+    error_coords = []
+
     for row in range_df.itertuples():
         depart_time = row.time_int
+        ev_num = row.EV_Number
         coords_pair = [[row.source_lon, row.source_lat],[row.destination_lon, row.destination_lat]]
 
         # getting route from API, returns list with coordinate pair list
             # returns something similar to input (ex just above) except with more datapoints
         try:
+            # api call to OpenRouteService 
             api_response = client.directions(coords_pair, profile="driving-car", format="geojson")
+            # getting just coordinates from simulated path
             route_coord_list = api_response["features"][0]["geometry"]["coordinates"]
 
+            ## Recalculating path so coordinates are evenly distributed along the path ##
+            
+            # converting to np array and splitting coords into lon and lat
+                # note: np.array [:,0] comma - grabs all first elems of all elem in second array
+                    # returns [-89.234, -89.2423, -89.5432, etc...]
+                # different from expected [:][0] - from all el in first array grab first elem (happens to be arr)
+                    # returns [-89.234, 36.543]
+            lon = np.array(route_coord_list)[:,0]
+            lat = np.array(route_coord_list)[:,1]
+
+            # calculating b-spline along the points of returned path
+            tck, u = splprep([lon, lat], s=0)
+
+            # recalculating points along line with new parameter values evenly spaced out
+            new_u = np.linspace(0, 1, 100) # 50 points generated, 50 good enough for ~all routes based on random testing
+            
+            # returns 50 new longitude and latitude coordinates along simulated path
+            new_lon, new_lat = splev(new_u, tck)
+
+            ##  --------------------------------------------------------------------- ##                                               
+
             # append coordinate list to master points list
-            for coord_pair in route_coord_list:
-                append_trio = coord_pair
-                append_trio.append(depart_time)
-                list_used.append(append_trio)
+                # new_lon and new_lat must be same size (should be)
+            for i in range(len(new_lon)):
+                list_used.append([new_lon[i], new_lat[i], depart_time])
 
         except ors.exceptions.ApiError as e:
             # catching errors for unreachable routes (mostly ev's that stopped inside airports etc., negligible)
             api_error_code = e.args[0]
             ors_error_code = e.args[1]["error"]["code"]
             ors_error_msg = e.args[1]["error"]["message"]
-            # print("API Error: ", api_error_code)
-            # print("Error Code: ", ors_error_code)
-            # print("Message: ", ors_error_msg)
-            # print()
+            if err:
+                print("API Error: ", api_error_code)
+                print("Error Code: ", ors_error_code)
+                print("EV Number: ", ev_num)
+                print("Message: ", ors_error_msg)
+                print()
+        except Exception as e:
+            # catching splprep errors for odd datapoints with same source and destination (i.e., near 0 distance travelled)
+            if err:
+                print("Error: ", e)
+                print("EV Number: ", ev_num)
+                print()
+
         
     return list_used
 
 # %%
 
 df_3 = cleaned_df[cleaned_df["EV_Number"]=="EV-3"]
-value_arr = df_3.iloc[0].tolist()
+
+value_arr = cleaned_df.iloc[533].tolist()
 coords_pair_3 = [[float(value_arr[7]), float(value_arr[6])], [float(value_arr[9]), float(value_arr[8])]]
 
 api_response_3 = client.directions(coords_pair_3, profile="driving-car", format="geojson")
 route_coord_list_3 = api_response_3["features"][0]["geometry"]["coordinates"]
 
-for coord_paid_arr in route_coord_list_3:
-    coord_paid_arr.append(value_arr[4])
-
 # %%
-points_3 = route_coord_list_3
-points_3_df = pd.DataFrame(points_3, columns=['lon', 'lat', 'time_int'])
-points_3_df
 
-# %%
-# unsorted values
-x_unsorted = points_3_df['lon'].to_numpy()
-y_unsorted = points_3_df['lat'].to_numpy()
+df_3 = cleaned_df[cleaned_df["EV_Number"]=="EV-3"]
+
+value_arr = cleaned_df.iloc[14].tolist()
+coords_pair_3 = [[float(value_arr[7]), float(value_arr[6])], [float(value_arr[9]), float(value_arr[8])]]
+
+api_response_3 = client.directions(coords_pair_3, profile="driving-car", format="geojson")
+route_coord_list_3 = api_response_3["features"][0]["geometry"]["coordinates"]
+
+# splitting into x and y 
+x_unsorted = np.array(route_coord_list_3)[:,0]
+y_unsorted = np.array(route_coord_list_3)[:,1]
 
 # prep
-new_t = np.linspace(0, 1, 50)
+new_t = np.linspace(0, 1, 10)
 new_tck, u = splprep([x_unsorted, y_unsorted], s=0)
 new_points = splev(new_t, new_tck)
 
@@ -334,102 +345,67 @@ plt.legend()
 plt.show()
 
 # %%
+cleaned_df[cleaned_df["EV_Number"]=="EV-4118"]
+
+# %%
+ds_points_6 = get_points(cleaned_df, [0,7], err=True)
+
+# %%
 ds_points_6 = get_points(cleaned_df, [0,8])
 
+# putting returned array into dataframe
 augmented_points_df_6 = pd.DataFrame(ds_points_6, columns=['lon', 'lat', 'time_int'])
+
+# setting the time_int column as category type (necessary for Datashade 3D aggregation by time dimension)
 augmented_points_df_6['time_int'] = augmented_points_df_6['time_int'].astype('category')
 
-len(augmented_points_df_6)
-
-# %%
+# creating canvas
 ds_canvas_6 = ds.Canvas(plot_width=500, plot_height=500)
 
+# making aggregate array
 agg_6 = ds_canvas_6.points(augmented_points_df_6, 'lon', 'lat', ds.by('time_int', ds.count()))
 
-# %%
 # shading original image with black background
-img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int='4'), px=2), cmap=cc.fire), "black")
-img_7 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int='7'), px=2), cmap=cc.fire), "black")
+img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=6), px=2), cmap=cc.fire), "black")
+img_7 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=7), px=2), cmap=cc.fire), "black")
 
 # displaying both images next to each other
 ds.tf.Images(img_6, img_7)
 
 # %%
-time_list = [6, 9]
+ds_points_6 = get_points(cleaned_df, [0,24])
 
-time_block_df_6 = time_blocks_24[6]["dataframe"]
-
-time_block_df_9 = time_blocks_24[9]["dataframe"]
-
-ds_points_6 = get_points(time_block_df_6)
-
-ds_points_9 = get_points(time_block_df_9)
-
-
+# %%
+# putting returned array into dataframe
 augmented_points_df_6 = pd.DataFrame(ds_points_6, columns=['lon', 'lat', 'time_int'])
 
-augmented_points_df_9 = pd.DataFrame(ds_points_9, columns=['lon', 'lat'])
+# setting the time_int column as category type (necessary for Datashade 3D aggregation by time dimension)
+augmented_points_df_6['time_int'] = augmented_points_df_6['time_int'].astype('category')
 
+# creating canvas
+ds_canvas_6 = ds.Canvas(plot_width=500, plot_height=500)
 
-# %%
-(agg_6.data.max(), agg_9.data.max())
+# making aggregate array
+agg_6 = ds_canvas_6.points(augmented_points_df_6, 'lon', 'lat', ds.by('time_int', ds.count()))
 
-# %%
 # shading original image with black background
-img_6 = ds.tf.set_background(ds.tf.shade(agg_9, cmap=cc.fire), "black")
-img_9 = ds.tf.set_background(ds.tf.shade(agg_9, cmap=cc.fire), "black")
+img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=23), px=1), cmap=cc.fire), "black")
 
-# displaying both images next to each other
-ds.tf.Images(img_6, img_9)
+cat_to_shade = augmented_points_df_6["time_int"].cat.categories
 
-# %%
-# morning datashader plotting
-morning_points_df = pd.DataFrame(df_blocks["morning"]["point_list"], columns=['lon', 'lat'])
-morning_canvas = ds.Canvas(plot_width=500, plot_height=500)
-morning_agg = morning_canvas.points(morning_points_df, 'lon', 'lat', ds.count())
+shade_imgs = []
 
-# midday datashader plotting
-midday_points_df = pd.DataFrame(df_blocks["midday"]["point_list"], columns=['lon', 'lat'])
-midday_canvas = ds.Canvas(plot_width=500, plot_height=500)
-midday_agg = midday_canvas.points(midday_points_df, 'lon', 'lat', ds.count())
-
-# evening datashader plotting
-evening_points_df = pd.DataFrame(df_blocks["evening"]["point_list"], columns=['lon', 'lat'])
-evening_canvas = ds.Canvas(plot_width=500, plot_height=500)
-evening_agg = evening_canvas.points(evening_points_df, 'lon', 'lat', ds.count())
-
-# %%
-# shading original image with black background
-original_img = ds.tf.set_background(ds.tf.shade(morning_agg, cmap=cc.fire), "black")
-
-# shading image with spread on pixels to "densify" it
-spread_img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(morning_agg, px=3), cmap=cc.fire), "black")
-
-# displaying both images next to each other
-ds.tf.Images(original_img, spread_img)
-
+for cat in cat_to_shade:
+    img_name = "hour-{}".format(cat)
+    save_path = "./routes-generated/bspline/"
+    img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=cat), px=1), cmap=cc.fire), "black")
+    ds.utils.export_image(img, filename=img_name, export_path=save_path)
 
 
 # %%
-# shading original image with black background
-original_img = ds.tf.set_background(ds.tf.shade(midday_agg, cmap=cc.fire), "black")
-
-# shading image with spread on pixels to "densify" it
-spread_img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(midday_agg, px=3), cmap=cc.fire), "black")
-
-# displaying both images next to each other
-ds.tf.Images(original_img, spread_img)
+ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=5), px=1), cmap=cc.fire), "black")
 
 # %%
-# shading original image with black background
-original_img = ds.tf.set_background(ds.tf.shade(evening_agg, cmap=cc.fire), "black")
-
-# shading image with spread on pixels to "densify" it
-spread_img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(evening_agg, px=3), cmap=cc.fire), "black")
-
-# displaying both images next to each other
-ds.tf.Images(original_img, spread_img)
-
-
+augmented_points_df_6["time_int"].cat.categories
 
 
