@@ -31,12 +31,6 @@ df_time_int = pd.DataFrame({'time_int':df_time_split[0]})
 df = df.join(df_time_decimal).join(df_time_int)
 
 # %%
-# histogram
-sns.histplot(df["time_decimal"])
-plt.title("Departure Time Histogram (All Trips)")
-plt.xlabel("Time (h)")
-
-# %%
 # separating dataset with only EV-#, Trip, Departure Time and Decimal Time
 cleaned_df = df[['EV Number', 'Trip', 'departure_time', 'time_decimal', 'time_int', 't_dist']]
 
@@ -53,6 +47,45 @@ cleaned_df.columns = ['EV_Number', 'Trip','departure_time', 'time_decimal', 'tim
 
 cleaned_df.head(10)
 
+
+# %%
+def prep_df(input_df):
+    # split departure time into separate columns (2) for hours and minutes
+    df_time_split = input_df['departure_time'].str.split(pat=':',expand=True).astype(int)
+
+    # converting hour-minute format to float and joining back into one number
+        # int value + 0. decimal value
+    time_num_decimal =  df_time_split[0] + df_time_split[1]/60
+
+    # put time decimal into pandas dataframe to join back with original
+    df_time_decimal = pd.DataFrame({'time_decimal':time_num_decimal})
+    df_time_int = pd.DataFrame({'time_int':df_time_split[0]})
+
+    # joining new column with time decimal and int with main dataframe
+    input_df = input_df.join(df_time_decimal).join(df_time_int)
+
+    # separating dataset with only EV-#, Trip, Departure Time and Decimal Time
+    clean_df = input_df[['EV Number', 'Trip', 'departure_time', 'time_decimal', 'time_int', 't_dist']]
+
+    # splitting coordinate cells by ',' into separate latitude and longitude columns for source and destination
+        # remember to convert into float
+    source_df = input_df['source'].str.split(pat=",", expand=True).astype('float32')
+    destination_df = input_df['destination'].str.split(pat=",", expand=True).astype('float32')
+
+    # joining back into separate columns
+    clean_df = pd.concat([clean_df, source_df, destination_df], axis=1)
+
+    # renaming columns
+    clean_df.columns = ['EV_Number', 'Trip','departure_time', 'time_decimal', 'time_int', 'distance', 'source_lat', 'source_lon', 'destination_lat', 'destination_lon']
+
+    return clean_df
+
+
+# %%
+# histogram
+sns.histplot(df["time_decimal"])
+plt.title("Departure Time Histogram (All Trips)")
+plt.xlabel("Time (h)")
 
 # %%
 sns.histplot(cleaned_df["distance"])
@@ -353,6 +386,7 @@ ds_points_6 = get_points(cleaned_df, [0,7], err=True)
 # %%
 ds_points_6 = get_points(cleaned_df, [0,8])
 
+# %%
 # putting returned array into dataframe
 augmented_points_df_6 = pd.DataFrame(ds_points_6, columns=['lon', 'lat', 'time_int'])
 
@@ -366,7 +400,7 @@ ds_canvas_6 = ds.Canvas(plot_width=500, plot_height=500)
 agg_6 = ds_canvas_6.points(augmented_points_df_6, 'lon', 'lat', ds.by('time_int', ds.count()))
 
 # shading original image with black background
-img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=6), px=2), cmap=cc.fire), "black")
+img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=6), px=3), cmap=cc.fire), "black")
 img_7 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=7), px=2), cmap=cc.fire), "black")
 
 # displaying both images next to each other
@@ -388,9 +422,6 @@ ds_canvas_6 = ds.Canvas(plot_width=500, plot_height=500)
 # making aggregate array
 agg_6 = ds_canvas_6.points(augmented_points_df_6, 'lon', 'lat', ds.by('time_int', ds.count()))
 
-# shading original image with black background
-img_6 = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=23), px=1), cmap=cc.fire), "black")
-
 cat_to_shade = augmented_points_df_6["time_int"].cat.categories
 
 shade_imgs = []
@@ -398,9 +429,45 @@ shade_imgs = []
 for cat in cat_to_shade:
     img_name = "hour-{}".format(cat)
     save_path = "./routes-generated/bspline/"
-    img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=cat), px=1), cmap=cc.fire), "black")
+    img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=cat), px=3), cmap=cc.fire), "black")
     ds.utils.export_image(img, filename=img_name, export_path=save_path)
 
+
+# %%
+def generate_maps(start, end, read_path="./final_step_data_collection", save_path="./routes-generated/final"):
+    for day in range(start,end):
+        # get data from csv file
+        csv_path = "{}/day_{}.csv".format(read_path, day)
+        
+        # get df with relevant data
+        day_df = prep_df(pd.read_csv(csv_path))
+
+        # get points for day
+        day_points = get_points(day_df, [0,24])
+
+        # putting points back into dataframe for plotting with Datashader
+        plotting_df = pd.DataFrame(day_points, columns=['lon', 'lat', 'time_int'])
+
+        # setting the time_int column as category type (necessary for Datashade 3D aggregation by time dimension)
+        plotting_df['time_int'] = plotting_df['time_int'].astype('category')
+
+        # creating canvas for Datashader plotting
+        ds_canvas = ds.Canvas(plot_width=500, plot_height=500)
+
+        # making aggregate array
+        agg = ds_canvas.points(plotting_df, 'lon', 'lat', ds.by('time_int', ds.count()))
+
+        # getting list of categories to iterate through (should be <=24, for 24h)
+        cat_to_shade = plotting_df["time_int"].cat.categories
+
+        # plotting image for every category (hour) in dataset
+        for cat in cat_to_shade:
+            img_name = "day-{}-hour-{}".format(day, cat)
+            img = ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg.sel(time_int=cat), px=3), cmap=cc.fire), "black")
+            ds.utils.export_image(img, filename=img_name, export_path=save_path)
+
+# %%
+generate_maps(1,31, read_path="./final_step_data_collection", save_path="./routes-generated/final")
 
 # %%
 ds.tf.set_background(ds.tf.shade(ds.tf.spread(agg_6.sel(time_int=5), px=1), cmap=cc.fire), "black")
