@@ -3,9 +3,17 @@ import cv2
 from random import shuffle
 import numpy as np
 from tqdm import tqdm
-from matplotlib import pyplot as plt
 
 def load_data(test_pc=0.3, img_size=256):
+    """
+    Loads dataset from local directory and resizes images to img_size, separating into train and test sets
+   
+    Args:
+        test_pc (values between 0 and 1)
+        img_size (square image)
+    Returns:
+        Tuple with train and test (each a tuple with X and y pair)
+    """
     data = []
     images_directory = "routes-generated/final"
 
@@ -24,6 +32,9 @@ def load_data(test_pc=0.3, img_size=256):
 
         # resizing each image to 256x256
         image = cv2.resize(cv2.imread(image_path), (img_size, img_size))
+
+        # OpenCV defaults to BGR by default, changing to RGB
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
         # appending image along with label to list
         data.append([np.array(image), np.array(np.uint8(label))])
@@ -44,7 +55,7 @@ def load_data(test_pc=0.3, img_size=256):
     trainX = images[test_index_split:]
     trainy = labels[test_index_split:]
     testX = images[:test_index_split]
-    testy = labels[test_index_split:]
+    testy = labels[:test_index_split]
 
     # return as (trainX, trainy), (testX, testy) tuple 
     return (np.array(trainX), np.array(trainy)), (np.array(testX), np.array(testy))
